@@ -134,7 +134,7 @@ func components() (component.Factories, error) {
 		splunkhecreceiver.NewFactory(),
 		statsdreceiver.NewFactory(),
 		wavefrontreceiver.NewFactory(),
-		webvitalsrecevier.NewFactory(),
+		webvitalsreceiver.NewFactory(),
 		windowsperfcountersreceiver.NewFactory(),
 		zookeeperreceiver.NewFactory(),
 		syslogreceiver.NewFactory(),

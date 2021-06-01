@@ -20,7 +20,6 @@ import (
 	"errors"
 	"io"
 	"io/ioutil"
-	"math"
 	"net/http"
 	"sync"
 	"time"
@@ -41,7 +40,6 @@ type webVitalsReceiver struct {
 
 	host         component.Host
 	nextConsumer consumer.Metrics
-	instanceName string
 	server       *http.Server
 
 	startOnce  sync.Once
@@ -77,7 +75,6 @@ func New(
 		logger:       logger,
 		config:       &config,
 		nextConsumer: nextConsumer,
-		instanceName: config.Name(),
 	}
 	return r, nil
 }
@@ -90,7 +87,7 @@ func (r *webVitalsReceiver) Start(_ context.Context, host component.Host) error 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	err := componenterror.ErrAlreadyStarted
+	err := componenterror.ErrNilNextConsumer
 	r.startOnce.Do(func() {
 		err = nil
 		r.host = host
@@ -118,8 +115,7 @@ func (r *webVitalsReceiver) ServeHTTP(w http.ResponseWriter, req *http.Request) 
 	}
 
 	transportType := req.Header.Get("Content-Type")
-	ctx = obsreport.ReceiverContext(ctx, r.instanceName, transportType)
-	ctx = obsreport.StartMetricsReceiveOp(ctx, r.instanceName, transportType)
+	ctx = obsreport.ReceiverContext(ctx, r.config.ID(), transportType)
 
 	slurp, _ := ioutil.ReadAll(req.Body)
 	if c, ok := req.Body.(io.Closer); ok {
@@ -136,7 +132,6 @@ func (r *webVitalsReceiver) ServeHTTP(w http.ResponseWriter, req *http.Request) 
 	}
 
 	consumerErr := r.nextConsumer.ConsumeMetrics(ctx, md)
-	obsreport.EndMetricsReceiveOp(ctx, "segment", 1, consumerErr)
 
 	if consumerErr != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -149,28 +144,24 @@ func (r *webVitalsReceiver) ServeHTTP(w http.ResponseWriter, req *http.Request) 
 
 func (r *webVitalsReceiver) webVitalsToMetric(blob []byte) (metrics pdata.Metrics, err error) {
 	var payload webVitalPayload
-	payload, err = r.deserializeFromJSON(blob)
+	t := time.Now()
+	payload, _ = r.deserializeFromJSON(blob)
 
-	datapoint := pdata.NewIntDataPoint()
-	datapoint.SetValue(int64(payload.Value))
-	datapoint.SetTimestamp(pdata.TimestampFromTime(r.convertFloatTimeToTime(payload.StartTime)))
-	datapoint.LabelsMap().Insert("id", payload.Id)
-
-	metric := pdata.NewMetric()
+	ms := pdata.NewMetrics()
+	rm := ms.ResourceMetrics().AppendEmpty()
+	ilms := rm.InstrumentationLibraryMetrics()
+	ilmsMetric := ilms.AppendEmpty()
+	metric := ilmsMetric.Metrics().AppendEmpty()
 	metric.SetName(payload.Name)
-	metric.SetUnit("count")
-	metric.SetDataType(pdata.MetricDataTypeIntGauge)
-	metric.IntGauge().DataPoints().Append(datapoint)
-
-	ilmetrics := pdata.NewInstrumentationLibraryMetrics()
-	ilmetrics.Metrics().Append(metric)
-
-	metricSeries := pdata.NewMetrics()
-	metricSeries.ResourceMetrics().Resize(1)
-	metricSeries.ResourceMetrics().At(0).InstrumentationLibraryMetrics().Resize(0)
-	metricSeries.ResourceMetrics().At(0).InstrumentationLibraryMetrics().Append(ilmetrics)
-
-	return metricSeries, nil
+	metric.SetUnit("ms")
+	metric.SetDataType(pdata.MetricDataTypeDoubleGauge)
+	dg := metric.DoubleGauge()
+	dp := dg.DataPoints().AppendEmpty()
+	dp.SetValue(payload.Value)
+	dp.LabelsMap().Insert("id", payload.Id)
+	dp.SetTimestamp(pdata.TimestampFromTime(t))
+	dp.SetStartTimestamp(pdata.TimestampFromTime(t))
+	return ms, nil
 }
 
 func (r *webVitalsReceiver) deserializeFromJSON(jsonBlob []byte) (t webVitalPayload, err error) {
@@ -181,15 +172,10 @@ func (r *webVitalsReceiver) deserializeFromJSON(jsonBlob []byte) (t webVitalPayl
 }
 
 func (r *webVitalsReceiver) Shutdown(context.Context) error {
-	err := componenterror.ErrAlreadyStopped
+	err := componenterror.ErrNilNextConsumer
 	r.stopOnce.Do(func() {
 		err = r.server.Close()
 		r.shutdownWG.Wait()
 	})
 	return err
-}
-
-func (r *webVitalsReceiver) convertFloatTimeToTime(t float64) (ct time.Time) {
-	sec, dec := math.Modf(t)
-	return time.Unix(int64(sec), int64(dec*(1e9)))
 }
